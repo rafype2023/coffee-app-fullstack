@@ -7,6 +7,11 @@ const path = require('path'); // Módulo para manejar rutas de archivos
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// --- Configuración Global de Tipos MIME ---
+// Le enseñamos a Express a servir archivos .ts y .tsx como JavaScript.
+// Esto soluciona los errores de "Strict MIME type checking".
+express.static.mime.define({'application/javascript': ['ts', 'tsx']});
+
 // --- Configuración de SendGrid ---
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
@@ -17,7 +22,7 @@ if (process.env.SENDGRID_API_KEY) {
 
 // --- Middlewares ---
 app.use(express.json());
-app.use(cors()); // Se puede usar una configuración de CORS más abierta o quitarla si todo es del mismo origen.
+app.use(cors());
 
 // --- Conexión a MongoDB ---
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -49,7 +54,13 @@ const orderSchema = new mongoose.Schema({
 
 const Order = mongoose.model('Order', orderSchema);
 
-// --- Rutas de la API (deben ir antes de servir los archivos estáticos) ---
+// --- Servir Archivos Estáticos del Frontend PRIMERO ---
+// Esto le dice a Express que sirva todos los archivos de la carpeta raíz del proyecto.
+// Gracias a la configuración de MIME, ya no se necesita la opción 'setHeaders'.
+app.use(express.static(path.join(__dirname)));
+
+
+// --- Rutas de la API ---
 
 // 1. Endpoint para CREAR un nuevo pedido con múltiples items
 app.post('/api/orders', async (req, res) => {
@@ -74,13 +85,27 @@ app.post('/api/orders', async (req, res) => {
     await newOrder.save();
 
     if (process.env.SENDGRID_API_KEY) {
+        const emailBody = `
+            <h1>Confirmación de tu pedido en Café R&P</h1>
+            <p>Hola ${employeeName},</p>
+            <p>Gracias por tu pedido. Para confirmarlo, por favor usa el siguiente código de verificación:</p>
+            <h2 style="font-size: 24px; letter-spacing: 5px; text-align: center; background-color: #f2f2f2; padding: 10px;">
+                ${verificationCode}
+            </h2>
+            <p><strong>Detalles del pedido:</strong></p>
+            <ul>
+                ${items.map(item => `<li>${item.quantity}x ${item.name} - $${(item.price * item.quantity).toFixed(2)}</li>`).join('')}
+            </ul>
+            <p><strong>Total: $${total.toFixed(2)}</strong></p>
+            <p>¡Gracias!</p>
+        `;
       const msg = {
         to: employeeEmail,
-        from: 'Rafyperez@hotmail.com',
+        from: 'Rafyperez@hotmail.com', // Email verificado en SendGrid
         subject: `Tu código de verificación para Café R&P: ${verificationCode}`,
-        html: `...` // El HTML del email va aquí
+        html: emailBody
       };
-      sgMail.send(msg).catch(emailError => console.error("Error al enviar el email:", emailError));
+      sgMail.send(msg).catch(emailError => console.error("Error al enviar el email:", emailError.response ? emailError.response.body : emailError));
     } else {
         console.log(`🔑 (SIMULADO) Código para ${employeeEmail}: ${verificationCode}`);
     }
@@ -99,39 +124,40 @@ app.post('/api/orders', async (req, res) => {
 
 // 2. Endpoint para VERIFICAR un pedido
 app.post('/api/orders/verify', async (req, res) => {
-    // ... Lógica de verificación ...
     const { orderId, code } = req.body;
-    if (!orderId || !code) return res.status(400).json({ success: false, message: 'Faltan datos.' });
-    const order = await Order.findById(orderId);
-    if (!order) return res.status(404).json({ success: false, message: 'Pedido no encontrado.' });
-    if (order.verificationCode === code) {
-      order.status = 'Confirmed';
-      await order.save();
-      return res.status(200).json({ success: true, message: 'Pedido confirmado.' });
-    } else {
-      return res.status(400).json({ success: false, message: 'Código incorrecto.' });
+    if (!orderId || !code) return res.status(400).json({ success: false, message: 'Faltan datos para la verificación.' });
+    
+    try {
+        const order = await Order.findById(orderId);
+        if (!order) return res.status(404).json({ success: false, message: 'Pedido no encontrado.' });
+        if (order.status === 'Confirmed') return res.status(400).json({ success: false, message: 'Este pedido ya ha sido confirmado.' });
+        
+        if (order.verificationCode === code) {
+          order.status = 'Confirmed';
+          await order.save();
+          return res.status(200).json({ success: true, message: 'Pedido confirmado exitosamente.' });
+        } else {
+          return res.status(400).json({ success: false, message: 'El código de verificación es incorrecto.' });
+        }
+    } catch(error) {
+        console.error("Error al verificar el pedido:", error);
+        res.status(500).json({ success: false, message: 'Error interno del servidor.' });
     }
 });
 
 // 3. Endpoint para OBTENER pedidos confirmados
 app.get('/api/orders/confirmed', async (req, res) => {
-    // ... Lógica para obtener pedidos ...
-    const confirmedOrders = await Order.find({ status: 'Confirmed' }).sort({ createdAt: -1 }).limit(20);
-    res.status(200).json(confirmedOrders);
+    try {
+        const confirmedOrders = await Order.find({ status: 'Confirmed' }).sort({ createdAt: -1 }).limit(20);
+        res.status(200).json(confirmedOrders);
+    } catch(error) {
+        console.error("Error al obtener pedidos confirmados:", error);
+        res.status(500).json({ success: false, message: 'Error interno del servidor.' });
+    }
 });
 
-// --- Servir Archivos Estáticos del Frontend ---
-// Esto le dice a Express que sirva todos los archivos de la carpeta raíz del proyecto.
-app.use(express.static(path.join(__dirname), {
-  setHeaders: (res, filePath) => {
-    if (filePath.endsWith('.tsx') || filePath.endsWith('.ts')) {
-      res.setHeader('Content-Type', 'application/javascript');
-    }
-  }
-}));
-
 // --- Ruta Catch-All ---
-// Para cualquier otra petición que no sea una ruta de API, sirve el index.html.
+// Para cualquier otra petición que no sea una ruta de API ni un archivo estático, sirve el index.html.
 // Esto es crucial para que el enrutamiento del lado del cliente de React funcione.
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
