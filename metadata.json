@@ -1,0 +1,5 @@
+{
+  "name": "Coffee Pre-Order App",
+  "description": "A web application for employees to pre-order their coffee and streamline the pickup process. The app includes an email verification step to confirm orders.",
+  "requestFramePermissions": []
+}
