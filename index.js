@@ -122,7 +122,13 @@ app.get('/api/orders/confirmed', async (req, res) => {
 
 // --- Servir Archivos Estáticos del Frontend ---
 // Esto le dice a Express que sirva todos los archivos de la carpeta raíz del proyecto.
-app.use(express.static(path.join(__dirname)));
+app.use(express.static(path.join(__dirname), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.tsx') || filePath.endsWith('.ts')) {
+      res.setHeader('Content-Type', 'application/javascript');
+    }
+  }
+}));
 
 // --- Ruta Catch-All ---
 // Para cualquier otra petición que no sea una ruta de API, sirve el index.html.
